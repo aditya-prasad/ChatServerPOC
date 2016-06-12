@@ -1,22 +1,88 @@
 package com.clanout.chatserver_poc;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.ChannelHandlerAdapter;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.util.CharsetUtil;
 import io.netty.util.ReferenceCountUtil;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
-public class GroupChatHandler extends ChannelHandlerAdapter
+import java.lang.ref.WeakReference;
+
+public class GroupChatHandler extends ChannelInboundHandlerAdapter implements User
 {
+    private static Logger LOG = LogManager.getLogger();
+
     private static final String JOIN_PREFIX = "join:";
     private static final String LEAVE_PREFIX = "leave:";
 
-    private ChatRoomService chatRoomService;
+    private GroupChatService groupChatService;
+    private WeakReference<ChannelHandlerContext> context;
 
-    public GroupChatHandler(ChatRoomService chatRoomService)
+    public GroupChatHandler(GroupChatService groupChatService)
     {
-        super();
-        this.chatRoomService = chatRoomService;
+        this.groupChatService = groupChatService;
+    }
+
+    @Override
+    public String getUserId()
+    {
+        ChannelHandlerContext ctx = context.get();
+        if (ctx != null)
+        {
+            return ctx.channel().id().asShortText();
+        }
+        else
+        {
+            return null;
+        }
+    }
+
+    @Override
+    public void onMessageReceived(ChatMessage message)
+    {
+        String msg = null;
+        if (message.getSenderId().equals(getUserId()))
+        {
+            msg = "[ME] " + message.getMessage();
+        }
+        else
+        {
+            msg = "[" + message.getSenderId() + "] " + message.getMessage();
+        }
+
+        ChannelHandlerContext ctx = context.get();
+        if (ctx != null)
+        {
+            ByteBuf out = ctx.alloc().buffer();
+            out.writeBytes(msg.getBytes());
+            ctx.write(out);
+            ctx.flush();
+        }
+    }
+
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception
+    {
+        context = new WeakReference<>(ctx);
+        LOG.info("Session created for " + getUserId());
+        super.channelActive(ctx);
+    }
+
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception
+    {
+        LOG.info("Session closed for " + getUserId());
+
+        String roomId = groupChatService.getActiveRoomId(this);
+        if (roomId != null)
+        {
+            groupChatService.leaveRoom(roomId, this);
+        }
+        context = null;
+
+        super.channelInactive(ctx);
     }
 
     @Override
@@ -31,17 +97,11 @@ public class GroupChatHandler extends ChannelHandlerAdapter
                 try
                 {
                     String roomId = input.split(":")[1];
-                    chatRoomService.joinRoom(roomId, ctx.channel());
-
-                    String message = ctx.channel().id().asShortText() + " joined\r\n";
-                    chatRoomService.postSystemMessage(roomId, message);
+                    groupChatService.joinRoom(roomId, this);
                 }
                 catch (IllegalStateException e)
                 {
-                    String message = "You have already joined another room. Enter 'leave:' to leave that room then try again\r\n";
-                    ByteBuf out = ctx.alloc().buffer();
-                    out.writeBytes(message.getBytes());
-                    ctx.writeAndFlush(out);
+                    onMessageReceived(ChatMessages.buildRoomAlreadyJoinedMessage());
                 }
                 catch (Exception e)
                 {
@@ -52,19 +112,14 @@ public class GroupChatHandler extends ChannelHandlerAdapter
             {
                 try
                 {
-                    String roomId = chatRoomService.getActiveRoomId(ctx.channel());
+                    String roomId = groupChatService.getActiveRoomId(this);
                     if (roomId == null)
                     {
-                        String message = "You have not joined any room. Enter 'join:<room_name>' to join that room\r\n";
-                        ByteBuf out = ctx.alloc().buffer();
-                        out.writeBytes(message.getBytes());
-                        ctx.writeAndFlush(out);
+                        onMessageReceived(ChatMessages.buildNoRoomJoinedMessage());
                     }
                     else
                     {
-                        String message = ctx.channel().id().asShortText() + " left\r\n";
-                        chatRoomService.postSystemMessage(roomId, message);
-                        chatRoomService.leaveRoom(roomId, ctx.channel());
+                        groupChatService.leaveRoom(roomId, this);
                     }
                 }
                 catch (Exception e)
@@ -76,17 +131,15 @@ public class GroupChatHandler extends ChannelHandlerAdapter
             {
                 try
                 {
-                    String roomId = chatRoomService.getActiveRoomId(ctx.channel());
+                    String roomId = groupChatService.getActiveRoomId(this);
                     if (roomId == null)
                     {
-                        String message = "You have not joined any room. Enter 'join:<room_name>' to join that room\r\n";
-                        ByteBuf out = ctx.alloc().buffer();
-                        out.writeBytes(message.getBytes());
-                        ctx.writeAndFlush(out);
+                        onMessageReceived(ChatMessages.buildNoRoomJoinedMessage());
                     }
                     else
                     {
-                        chatRoomService.post(roomId, ctx.channel(), input);
+                        ChatMessage chatMessage = new ChatMessage(roomId, getUserId(), input);
+                        groupChatService.post(chatMessage);
                     }
                 }
                 catch (Exception e)
@@ -104,7 +157,7 @@ public class GroupChatHandler extends ChannelHandlerAdapter
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception
     {
-        cause.printStackTrace();
+        LOG.error("Error", cause);
         ctx.close();
     }
 }
