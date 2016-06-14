@@ -96,7 +96,7 @@ public class GroupChatHandler extends ChannelInboundHandlerAdapter implements Us
             {
                 try
                 {
-                    String roomId = input.split(":")[1];
+                    String roomId = input.split(":")[1].replace("\r\n", "");
                     groupChatService.joinRoom(roomId, this);
                 }
                 catch (IllegalStateException e)
